@@ -8,6 +8,7 @@ config.json
 
 # Logs (may contain forwarded message content)
 *.log
+logs/
 
 # Virtual environment
 .venv/

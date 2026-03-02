@@ -7,8 +7,11 @@ Requires user account credentials (API ID, API Hash from my.telegram.org).
 """
 
 import asyncio
+import logging
 import os
 import re
+import sys
+from logging.handlers import RotatingFileHandler
 from typing import List, Tuple
 
 try:
@@ -27,6 +30,37 @@ API_HASH = os.environ.get("TELEGRAM_API_HASH", "")
 SESSION_NAME = os.environ.get("TELEGRAM_SESSION", "epstein_coalition_alerts_session")
 SESSION_PATH = os.path.join(SCRIPT_DIR, SESSION_NAME)
 
+LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
+LOG_FILE = os.path.join(LOG_DIR, "forwarder.log")
+MAX_LOG_BYTES = 5 * 1024 * 1024  # 5 MB
+BACKUP_COUNT = 3
+
+# Setup logging
+def _setup_logging() -> logging.Logger:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    logger = logging.getLogger("epstein_tg_alerts")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=MAX_LOG_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+
+    # Also log to stdout when run interactively (e.g. for debugging)
+    if sys.stdout.isatty():
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(fmt)
+        logger.addHandler(console_handler)
+
+    return logger
+
+log = _setup_logging()
+
+
 # Output channels: list of (destination, keywords_list)
 # Channel 1: FORWARD_TO_1 + KEYWORDS_1, or legacy FORWARD_TO + KEYWORDS
 # Channel 2: FORWARD_TO_2 + KEYWORDS_2
@@ -39,7 +73,7 @@ def _get_output_channels() -> List[Tuple[str, List[str]]]:
     # Channel 1
     dest1 = os.environ.get("TELEGRAM_FORWARD_TO_1")
     kw1 = _parse_keywords(
-        os.environ.get("TELEGRAM_KEYWORDS_1") 
+        os.environ.get("TELEGRAM_KEYWORDS_1")
     )
     if dest1 and kw1:
         channels.append((dest1, kw1))
@@ -66,18 +100,25 @@ def message_contains_keywords(text: str, keywords: List[str]) -> bool:
     return False
 
 
-async def main():
-    print("Connecting to Telegram...", flush=True)
+async def run_client(client: TelegramClient, output_channels: List[Tuple[str, List[str]]]) -> None:
+    """Run the client until disconnected."""
+    await client.run_until_disconnected()
+
+
+async def main() -> int:
+    log.info("Connecting to Telegram...")
     if not API_ID or not API_HASH:
-        print("Error: Set TELEGRAM_API_ID and TELEGRAM_API_HASH environment variables.", flush=True)
-        print("Get them from https://my.telegram.org", flush=True)
-        return
+        log.error("Set TELEGRAM_API_ID and TELEGRAM_API_HASH environment variables.")
+        log.error("Get them from https://my.telegram.org")
+        return 1
 
     output_channels = _get_output_channels()
     if not output_channels:
-        print("Error: Configure at least one output. Set TELEGRAM_FORWARD_TO + TELEGRAM_KEYWORDS "
-              "(or TELEGRAM_FORWARD_TO_1 + TELEGRAM_KEYWORDS_1).", flush=True)
-        return
+        log.error(
+            "Configure at least one output. Set TELEGRAM_FORWARD_TO + TELEGRAM_KEYWORDS "
+            "(or TELEGRAM_FORWARD_TO_1 + TELEGRAM_KEYWORDS_1)."
+        )
+        return 1
 
     client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
@@ -98,16 +139,64 @@ async def main():
                 continue
             try:
                 await event.forward_to(dest)
-                print(f"Forwarded to {dest} from {chat.title}: {text[:80]}...", flush=True)
+                log.info("Forwarded to %s from %s: %s...", dest, chat.title, (text or "")[:80])
             except Exception as e:
-                print(f"Failed to forward to {dest}: {e}", flush=True)
+                log.exception("Failed to forward to %s: %s", dest, e)
 
     await client.start()
     for i, (dest, kw) in enumerate(output_channels, 1):
-        print(f"Channel {i}: forwarding to {dest} (keywords: {kw})", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
-    await client.run_until_disconnected()
+        log.info("Channel %d: forwarding to %s (keywords: %s)", i, dest, kw)
+    log.info("Press Ctrl+C to stop.")
+
+    # Reconnection loop with exponential backoff
+    base_delay = 5
+    max_delay = 300
+    attempt = 0
+
+    while True:
+        try:
+            await client.run_until_disconnected()
+            # If we get here, client disconnected
+            log.warning("Telegram client disconnected. Reconnecting in %ds...", base_delay)
+            delay = base_delay
+            attempt = 0
+        except asyncio.CancelledError:
+            log.info("Shutdown requested.")
+            break
+        except Exception as e:
+            attempt += 1
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            log.exception("Client error (attempt %d): %s. Reconnecting in %ds...", attempt, e, delay)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+        await asyncio.sleep(delay)
+        try:
+            await client.connect()
+        except Exception as e:
+            log.exception("Reconnect failed: %s", e)
+            await asyncio.sleep(delay)
+            continue
+
+    return 0
+
+
+def _excepthook(exc_type, exc_val, exc_tb):
+    """Log unhandled exceptions before exit."""
+    log.critical("Unhandled exception: %s", exc_val, exc_info=(exc_type, exc_val, exc_tb))
+    sys.__excepthook__(exc_type, exc_val, exc_tb)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.excepthook = _excepthook
+    try:
+        exit_code = asyncio.run(main())
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        log.info("Interrupted by user.")
+        sys.exit(0)
+    except Exception as e:
+        log.exception("Fatal error: %s", e)
+        sys.exit(1)

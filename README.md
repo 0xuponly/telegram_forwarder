@@ -29,11 +29,32 @@ Forwards Telegram messages from **channels only** (ignores chats and groups) whe
 
 ## Run
 
+**One-off / manual:**
 ```bash
 python forward_channel_messages.py
 ```
 
 On first run you’ll be asked for your phone number and the login code sent to Telegram.
+
+**Background (macOS, for 24/7 uptime):** Use launchd to auto-restart on crash and run at login:
+
+```bash
+# Install the plist
+cp com.epstein.tg-alerts.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.epstein.tg-alerts.plist
+
+# Check status
+launchctl list | grep epstein
+
+# View logs
+tail -f logs/out.log
+tail -f logs/err.log
+
+# Stop
+launchctl unload ~/Library/LaunchAgents/com.epstein.tg-alerts.plist
+```
+
+The plist uses `run.sh` to load `.env` and run the script. Logs go to `logs/`.
 
 ## Configuration
 
