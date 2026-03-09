@@ -1,4 +1,4 @@
-# UAE/Qatar War Alerts by slumcap – Telegram Channel Forwarder
+War Alerts by slumcap – Telegram Channel Forwarder
 
 Forwards Telegram messages from **channels only** (ignores chats and groups) when they contain certain keywords.
 
@@ -25,6 +25,9 @@ Forwards Telegram messages from **channels only** (ignores chats and groups) whe
    export TELEGRAM_KEYWORDS_1=dubai,uae,u.a.e.,abu dhabi,sharjah
    export TELEGRAM_FORWARD_TO_2=@channel2
    export TELEGRAM_KEYWORDS_2=alert,urgent
+   # Optional channel 3
+   export TELEGRAM_FORWARD_TO_3=@channel3
+   export TELEGRAM_KEYWORDS_3=another,comma,separated,list
    ```
 
 ## Run
@@ -66,6 +69,8 @@ The plist uses `run.sh` to load `.env` and run the script. Logs go to `logs/`.
 | `TELEGRAM_KEYWORDS_1` | Yes* | Channel 1 keywords (comma-separated, word-boundary match) |
 | `TELEGRAM_FORWARD_TO_2` | No | Channel 2 destination |
 | `TELEGRAM_KEYWORDS_2` | No | Channel 2 keywords |
+| `TELEGRAM_FORWARD_TO_3` | No | Channel 3 destination |
+| `TELEGRAM_KEYWORDS_3` | No | Channel 3 keywords |
 | `TELEGRAM_SESSION` | No | Session file name (default: `dubai_alerts_session`) |
 | `TELEGRAM_CASE_INSENSITIVE` | No | `true` or `false` (default: `true`) |
 

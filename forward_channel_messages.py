@@ -11,8 +11,19 @@ import logging
 import os
 import re
 import sys
+from collections import deque
 from logging.handlers import RotatingFileHandler
 from typing import List, Tuple
+
+# Dedupe 1: same (chat_id, message_id) never forwarded twice (handles duplicate Telegram events)
+DEDUP_MAX_SIZE = 2000
+_forwarded_ids: set = set()
+_forwarded_ids_order: deque = deque()
+
+# Dedupe 2: same text never forwarded twice to the same dest (different source channels, same content)
+CONTENT_DEDUP_MAX_SIZE = 2000
+_content_forwarded: set = set()  # (dest, content_hash)
+_content_forwarded_order: deque = deque()
 
 try:
     from dotenv import load_dotenv
@@ -38,7 +49,7 @@ BACKUP_COUNT = 3
 # Setup logging
 def _setup_logging() -> logging.Logger:
     os.makedirs(LOG_DIR, exist_ok=True)
-    logger = logging.getLogger("epstein_tg_alerts")
+    logger = logging.getLogger("epstein_coalition_tg_alerts")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
@@ -64,28 +75,43 @@ log = _setup_logging()
 # Output channels: list of (destination, keywords_list)
 # Channel 1: FORWARD_TO_1 + KEYWORDS_1, or legacy FORWARD_TO + KEYWORDS
 # Channel 2: FORWARD_TO_2 + KEYWORDS_2
+# Channel 3: FORWARD_TO_3 + KEYWORDS_3
 def _parse_keywords(s: str) -> List[str]:
     return [k.strip() for k in (s or "").lower().split(",") if k.strip()]
 
 
 def _get_output_channels() -> List[Tuple[str, List[str]]]:
-    channels = []
+    channels: List[Tuple[str, List[str]]] = []
+
     # Channel 1
     dest1 = os.environ.get("TELEGRAM_FORWARD_TO_1")
-    kw1 = _parse_keywords(
-        os.environ.get("TELEGRAM_KEYWORDS_1")
-    )
+    kw1 = _parse_keywords(os.environ.get("TELEGRAM_KEYWORDS_1"))
     if dest1 and kw1:
         channels.append((dest1, kw1))
+
     # Channel 2
     dest2 = os.environ.get("TELEGRAM_FORWARD_TO_2")
     kw2 = _parse_keywords(os.environ.get("TELEGRAM_KEYWORDS_2", ""))
     if dest2 and kw2:
         channels.append((dest2, kw2))
+
+    # Channel 3
+    dest3 = os.environ.get("TELEGRAM_FORWARD_TO_3")
+    kw3 = _parse_keywords(os.environ.get("TELEGRAM_KEYWORDS_3", ""))
+    if dest3 and kw3:
+        channels.append((dest3, kw3))
+
     return channels
 
 # Set to True for case-insensitive matching
 KEYWORDS_CASE_INSENSITIVE = os.environ.get("TELEGRAM_CASE_INSENSITIVE", "true").lower() == "true"
+
+
+def _normalize_text_for_dedupe(text: str) -> str:
+    """Normalize so same content from different sources hashes the same."""
+    if not text:
+        return ""
+    return " ".join(text.lower().split())
 
 
 def message_contains_keywords(text: str, keywords: List[str]) -> bool:
@@ -133,10 +159,30 @@ async def main() -> int:
         if not isinstance(chat, Channel) or not getattr(chat, "broadcast", False):
             return
 
+        # Dedupe: skip if we already forwarded this exact message (handles duplicate events)
+        dedupe_key = (event.chat_id, event.id)
+        if dedupe_key in _forwarded_ids:
+            return
+        if len(_forwarded_ids) >= DEDUP_MAX_SIZE:
+            _forwarded_ids.discard(_forwarded_ids_order.popleft())
+        _forwarded_ids.add(dedupe_key)
+        _forwarded_ids_order.append(dedupe_key)
+
         text = event.text or ""
+        content_hash = hash(_normalize_text_for_dedupe(text))
+
         for dest, keywords in output_channels:
             if not message_contains_keywords(text, keywords):
                 continue
+            # Per-dest content dedupe: don't forward same text to same channel twice (e.g. from different sources)
+            content_key = (dest, content_hash)
+            if content_key in _content_forwarded:
+                continue
+            if len(_content_forwarded) >= CONTENT_DEDUP_MAX_SIZE:
+                _content_forwarded.discard(_content_forwarded_order.popleft())
+            _content_forwarded.add(content_key)
+            _content_forwarded_order.append(content_key)
+
             try:
                 await event.forward_to(dest)
                 log.info("Forwarded to %s from %s: %s...", dest, chat.title, (text or "")[:80])
