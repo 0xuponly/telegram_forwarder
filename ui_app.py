@@ -11,8 +11,12 @@ Master sound toggle writes logs/ui_state.json; forwarder must be running to resp
 """
 
 import json
+import logging
 import os
 import sys
+
+# No per-request lines on stderr when run in background
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 try:
     from dotenv import load_dotenv
@@ -204,7 +208,12 @@ def main():
     if not os.path.isfile(UI_STATE_FILE):
         _write_state(_default_state())
     port = int(os.environ.get("TELEGRAM_UI_PORT", "8765"))
-    print("Open http://127.0.0.1:" + str(port) + "  (master sound + forwards)", flush=True)
+    if sys.stdout.isatty() and os.environ.get("TELEGRAM_UI_QUIET", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        print("Open http://127.0.0.1:" + str(port), flush=True)
     app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
 
 
