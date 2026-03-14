@@ -1,63 +1,99 @@
-War Alerts by slumcap – Telegram Channel Forwarder
+# Third Gulf War Alerts – Telegram channel forwarder
 
-Forwards Telegram messages from **channels only** (ignores chats and groups) when they contain certain keywords.
+Forwards messages from **broadcast Telegram channels only** (groups and private chats are ignored) when the text matches keyword lists. Each destination channel has its own keyword set; a message can be forwarded to more than one destination if it matches multiple sets.
+
+Uses [Telethon](https://docs.telethon.dev/) (user session, not the Bot API).
+
+---
 
 ## Prerequisites
 
-- Python 3.8+
-- A Telegram account (user, not bot)
-- API credentials from [my.telegram.org](https://my.telegram.org)
+- **Python 3.8+** (3.10+ recommended)
+- A **Telegram user account**
+- **API ID & API Hash** from [my.telegram.org](https://my.telegram.org) → API development tools
+
+---
 
 ## Setup
 
-1. **Create an app** at [my.telegram.org](https://my.telegram.org) → API development tools.
-2. **Install dependencies:**
+1. Clone the repo and enter the project directory (paths below assume this folder).
+
+2. **Dependencies** (virtualenv recommended):
+
    ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -r requirements.txt
    ```
-3. **Configure environment** – copy `.env.example` to `.env` and edit, or export:
+
+3. **Environment** – copy the example and edit **from the project directory**:
+
    ```bash
-   cp .env.example .env   # then edit .env
-   # OR export directly:
-   export TELEGRAM_API_ID=12345678
-   export TELEGRAM_API_HASH=your_api_hash
-   export TELEGRAM_FORWARD_TO_1=@channel1
-   export TELEGRAM_KEYWORDS_1=dubai,uae,u.a.e.,abu dhabi,sharjah
-   export TELEGRAM_FORWARD_TO_2=@channel2
-   export TELEGRAM_KEYWORDS_2=alert,urgent
-   # Optional channel 3
-   export TELEGRAM_FORWARD_TO_3=@channel3
-   export TELEGRAM_KEYWORDS_3=another,comma,separated,list
+   cp .env.example .env
    ```
+
+   Set at least **API ID/Hash** and **one** destination + keywords (`TELEGRAM_FORWARD_TO_1` + `TELEGRAM_KEYWORDS_1`).  
+   Optional: up to **three** destinations (`_1`, `_2`, `_3`).
+
+   **Important:** Do **not** `source .env` in the shell if keywords contain spaces (e.g. `abu dhabi`). The app loads `.env` via `python-dotenv` when you run `run.sh` or `forward_channel_messages.py`.
+
+---
 
 ## Run
 
-**One-off / manual:**
-```bash
-python forward_channel_messages.py
-```
-
-On first run you’ll be asked for your phone number and the login code sent to Telegram.
-
-**Background (macOS, for 24/7 uptime):** Use launchd to auto-restart on crash and run at login:
+### Manual (terminal)
 
 ```bash
-# Install the plist
-cp com.epstein.tg-alerts.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.epstein.tg-alerts.plist
-
-# Check status
-launchctl list | grep epstein
-
-# View logs
-tail -f logs/out.log
-tail -f logs/err.log
-
-# Stop
-launchctl unload ~/Library/LaunchAgents/com.epstein.tg-alerts.plist
+cd /path/to/epstein_coalition_tg_alerts_0.1
+./run.sh
+# or: python forward_channel_messages.py
 ```
 
-The plist uses `run.sh` to load `.env` and run the script. Logs go to `logs/`.
+First run: Telegram will ask for phone number and login code. Session is stored next to the script (see `TELEGRAM_SESSION`).
+
+### Background on macOS (launchd)
+
+1. **Edit the plist** `com.epstein.tg-alerts.plist`: every path must match **your** machine (project path, same as in the repo or your clone).
+
+2. **Create logs directory** (launchd needs it before the job can attach stdout/stderr):
+
+   ```bash
+   cd /path/to/epstein_coalition_tg_alerts_0.1
+   mkdir -p logs
+   ```
+
+3. **Install and start** (run from project dir so `cp` finds the plist):
+
+   ```bash
+   cp com.epstein.tg-alerts.plist ~/Library/LaunchAgents/
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.epstein.tg-alerts.plist
+   ```
+
+   Older macOS may still accept:
+
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.epstein.tg-alerts.plist
+   ```
+
+4. **Check**
+
+   ```bash
+   launchctl list | grep epstein
+   ```
+
+   A **numeric PID** in the first column means the process is running. Status column can show a past non-zero exit until the next clean run.
+
+5. **Stop**
+
+   ```bash
+   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.epstein.tg-alerts.plist
+   ```
+
+   After code or `.env` changes, **bootout then bootstrap again** (or unload/load).
+
+`run.sh` uses `.venv/bin/python` if present; otherwise `python3`. It does **not** shell-`source` `.env` (avoids breaking comma/spaced keywords).
+
+---
 
 ## Configuration
 
@@ -65,28 +101,61 @@ The plist uses `run.sh` to load `.env` and run the script. Logs go to `logs/`.
 |----------|----------|-------------|
 | `TELEGRAM_API_ID` | Yes | From my.telegram.org |
 | `TELEGRAM_API_HASH` | Yes | From my.telegram.org |
-| `TELEGRAM_FORWARD_TO_1` | Yes* | Channel 1 destination (username, chat ID, or invite link) |
-| `TELEGRAM_KEYWORDS_1` | Yes* | Channel 1 keywords (comma-separated, word-boundary match) |
-| `TELEGRAM_FORWARD_TO_2` | No | Channel 2 destination |
-| `TELEGRAM_KEYWORDS_2` | No | Channel 2 keywords |
-| `TELEGRAM_FORWARD_TO_3` | No | Channel 3 destination |
-| `TELEGRAM_KEYWORDS_3` | No | Channel 3 keywords |
-| `TELEGRAM_SESSION` | No | Session file name (default: `dubai_alerts_session`) |
-| `TELEGRAM_CASE_INSENSITIVE` | No | `true` or `false` (default: `true`) |
-| `TELEGRAM_NEAR_DUP_WINDOW` | No | How many recent forwards per destination to compare (default: `80`) |
-| `TELEGRAM_NEAR_DUP_SEQ_RATIO` | No | Sequence similarity 0–1; higher = stricter (default: `0.82`) |
+| `TELEGRAM_FORWARD_TO_1` | Yes* | Destination 1 (`@channel`, id, or invite link) |
+| `TELEGRAM_KEYWORDS_1` | Yes* | Comma-separated keywords; word-boundary match |
+| `TELEGRAM_FORWARD_TO_2` | No | Destination 2 |
+| `TELEGRAM_KEYWORDS_2` | No | Keywords for destination 2 |
+| `TELEGRAM_FORWARD_TO_3` | No | Destination 3 |
+| `TELEGRAM_KEYWORDS_3` | No | Keywords for destination 3 |
+| `TELEGRAM_SESSION` | No | Session filename (default: `epstein_coalition_alerts_session`) |
+| `TELEGRAM_CASE_INSENSITIVE` | No | `true` / `false` (default: `true`) |
+| `TELEGRAM_NEAR_DUP_WINDOW` | No | Recent forwards per dest used for near-dup compare (default: `80`) |
+| `TELEGRAM_NEAR_DUP_SEQ_RATIO` | No | Sequence similarity 0–1, higher = stricter (default: `0.82`) |
 | `TELEGRAM_NEAR_DUP_JACCARD` | No | Word-overlap similarity 0–1 (default: `0.68`) |
-| `TELEGRAM_NEAR_DUP_COMPARE_CHARS` | No | Max chars used per message for similarity (default: `1200`) |
+| `TELEGRAM_NEAR_DUP_COMPARE_CHARS` | No | Max characters compared per message (default: `1200`) |
+| `TELEGRAM_FILTERED_LOG_MAX_BYTES` | No | Max size of `filtered.log` before rotate (default: 10MB) |
 
-*Channel 1 can also use legacy `TELEGRAM_FORWARD_TO` + `TELEGRAM_KEYWORDS`.
+\*At least one full pair `_FORWARD_TO_1` + `_KEYWORDS_1` must be set.
 
-Near-duplicate detection skips forwards when wording is **almost the same** as a recent message already sent to that destination (paraphrases / reposts from other channels). Tune thresholds if you see false positives or misses.
+---
 
-**Filtered log:** Skips (exact duplicate, near duplicate, duplicate Telegram event) are appended to `logs/filtered.log` with the filtered message body and the prior forward (or explanation) that caused the skip. Optional: `TELEGRAM_FILTERED_LOG_MAX_BYTES` (default 10MB) for rotation size.
+## Dedupe behaviour
+
+1. **Same Telegram event** – Same `(chat_id, message_id)` is only handled once (stops duplicate client updates).
+2. **Exact same text → same destination** – Already forwarded that normalized text to that channel → skip.
+3. **Near duplicate → same destination** – New message is very similar (sequence + word overlap) to a recent forward to that channel → skip (reposts / paraphrases from other sources).
+
+Tune near-dup env vars if you see false positives or misses.
+
+---
+
+## Logs
+
+| File | Purpose |
+|------|--------|
+| `logs/forwarder.log` | Connects, config summary, successful forwards, errors (rotating) |
+| `logs/filtered.log` | Messages **not** forwarded + reason + text of the **prior forward** (or note) that caused the skip |
+| `logs/out.log` | launchd stdout (if plist points here) |
+| `logs/err.log` | launchd stderr |
+
+```bash
+tail -n 100 logs/forwarder.log
+tail -n 100 logs/filtered.log
+```
+
+---
+
+## Troubleshooting
+
+- **`launchctl list` shows `-` and exit `1`** – process died; run `./run.sh` in the project dir to see the error; fix `.env` or Python deps.
+- **Exit `127`** – program path in plist wrong or missing venv/script.
+- **Only one Telethon session** – Don’t run two copies with the same session file at once.
+- **plist paths** – Must match the real project path on disk after clone/move.
+
+---
 
 ## Notes
 
-- Only **broadcast channels** are processed; groups and private chats are ignored.
-- You must be a member of the channels you want to monitor.
-- Keywords use word boundaries (e.g. `dubai` does not match `dubaiairport`).
-- A message matching multiple channel keyword sets is forwarded to each matching channel.
+- Only **broadcast channels** are considered; you must be joined to sources you care about.
+- Keywords use **word boundaries** (e.g. `dubai` does not match `dubaiairport`).
+- One message matching several keyword sets is forwarded **once per matching destination**; dedupe is **per destination**.
