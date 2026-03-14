@@ -73,8 +73,16 @@ The plist uses `run.sh` to load `.env` and run the script. Logs go to `logs/`.
 | `TELEGRAM_KEYWORDS_3` | No | Channel 3 keywords |
 | `TELEGRAM_SESSION` | No | Session file name (default: `dubai_alerts_session`) |
 | `TELEGRAM_CASE_INSENSITIVE` | No | `true` or `false` (default: `true`) |
+| `TELEGRAM_NEAR_DUP_WINDOW` | No | How many recent forwards per destination to compare (default: `80`) |
+| `TELEGRAM_NEAR_DUP_SEQ_RATIO` | No | Sequence similarity 0–1; higher = stricter (default: `0.82`) |
+| `TELEGRAM_NEAR_DUP_JACCARD` | No | Word-overlap similarity 0–1 (default: `0.68`) |
+| `TELEGRAM_NEAR_DUP_COMPARE_CHARS` | No | Max chars used per message for similarity (default: `1200`) |
 
 *Channel 1 can also use legacy `TELEGRAM_FORWARD_TO` + `TELEGRAM_KEYWORDS`.
+
+Near-duplicate detection skips forwards when wording is **almost the same** as a recent message already sent to that destination (paraphrases / reposts from other channels). Tune thresholds if you see false positives or misses.
+
+**Filtered log:** Skips (exact duplicate, near duplicate, duplicate Telegram event) are appended to `logs/filtered.log` with the filtered message body and the prior forward (or explanation) that caused the skip. Optional: `TELEGRAM_FILTERED_LOG_MAX_BYTES` (default 10MB) for rotation size.
 
 ## Notes
 

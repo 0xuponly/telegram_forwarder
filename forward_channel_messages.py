@@ -7,11 +7,12 @@ Requires user account credentials (API ID, API Hash from my.telegram.org).
 """
 
 import asyncio
+import difflib
 import logging
 import os
 import re
 import sys
-from collections import deque
+from collections import defaultdict, deque
 from logging.handlers import RotatingFileHandler
 from typing import List, Tuple
 
@@ -24,6 +25,18 @@ _forwarded_ids_order: deque = deque()
 CONTENT_DEDUP_MAX_SIZE = 2000
 _content_forwarded: set = set()  # (dest, content_hash)
 _content_forwarded_order: deque = deque()
+# Sample of text last forwarded per (dest, hash) — for filtered.log when exact duplicate
+_exact_forwarded_sample: dict = {}
+
+# Dedupe 3: near-duplicate wording (same story, paraphrased) per destination
+NEAR_DUP_WINDOW = int(os.environ.get("TELEGRAM_NEAR_DUP_WINDOW", "80"))
+NEAR_DUP_SEQ_RATIO = float(os.environ.get("TELEGRAM_NEAR_DUP_SEQ_RATIO", "0.82"))
+NEAR_DUP_JACCARD = float(os.environ.get("TELEGRAM_NEAR_DUP_JACCARD", "0.68"))
+NEAR_DUP_COMPARE_CHARS = int(os.environ.get("TELEGRAM_NEAR_DUP_COMPARE_CHARS", "1200"))
+# Per dest: deque of (normalized_for_similarity, original_text_sample) from last forwards
+_recent_text_by_dest: dict[str, deque] = defaultdict(
+    lambda: deque(maxlen=NEAR_DUP_WINDOW)
+)
 
 try:
     from dotenv import load_dotenv
@@ -43,8 +56,10 @@ SESSION_PATH = os.path.join(SCRIPT_DIR, SESSION_NAME)
 
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "forwarder.log")
+FILTERED_LOG_FILE = os.path.join(LOG_DIR, "filtered.log")
 MAX_LOG_BYTES = 5 * 1024 * 1024  # 5 MB
 BACKUP_COUNT = 3
+FILTERED_LOG_MAX_BYTES = int(os.environ.get("TELEGRAM_FILTERED_LOG_MAX_BYTES", str(10 * 1024 * 1024)))
 
 # Setup logging
 def _setup_logging() -> logging.Logger:
@@ -69,7 +84,49 @@ def _setup_logging() -> logging.Logger:
 
     return logger
 
+
+def _setup_filtered_logger() -> logging.Logger:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    lg = logging.getLogger("epstein_coalition_filtered")
+    lg.setLevel(logging.INFO)
+    lg.handlers.clear()
+    lg.propagate = False
+    h = RotatingFileHandler(
+        FILTERED_LOG_FILE,
+        maxBytes=FILTERED_LOG_MAX_BYTES,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    h.setFormatter(
+        logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    lg.addHandler(h)
+    return lg
+
+
 log = _setup_logging()
+filter_log = _setup_filtered_logger()
+
+CLIP = 4000
+
+
+def _log_filtered(
+    reason: str,
+    dest: str,
+    source_chat: str,
+    filtered_body: str,
+    matched_body: str,
+) -> None:
+    """Log a message that was not forwarded and the prior forward that caused it."""
+    filter_log.info(
+        "reason=%s | dest=%s | source=%s\n--- filtered (this message) ---\n%s\n--- matched (prior forward / basis) ---\n%s\n%s\n",
+        reason,
+        dest,
+        source_chat,
+        (filtered_body or "")[:CLIP],
+        (matched_body or "")[:CLIP],
+        "-" * 60,
+    )
 
 
 # Output channels: list of (destination, keywords_list)
@@ -112,6 +169,34 @@ def _normalize_text_for_dedupe(text: str) -> str:
     if not text:
         return ""
     return " ".join(text.lower().split())
+
+
+def _normalize_for_similarity(text: str) -> str:
+    """Strip punctuation / noise so paraphrases compare better."""
+    if not text:
+        return ""
+    t = text.lower()
+    t = re.sub(r"[^\w\s]", " ", t, flags=re.UNICODE)
+    return " ".join(t.split())
+
+
+def _similar_enough(a: str, b: str) -> bool:
+    """True if two strings are likely the same story (wording may differ)."""
+    if not a or not b:
+        return False
+    n = NEAR_DUP_COMPARE_CHARS
+    a, b = a[:n], b[:n]
+    if difflib.SequenceMatcher(None, a, b).ratio() >= NEAR_DUP_SEQ_RATIO:
+        return True
+    ta = set(re.findall(r"\w{2,}", a, flags=re.UNICODE))
+    tb = set(re.findall(r"\w{2,}", b, flags=re.UNICODE))
+    if len(ta) < 4 or len(tb) < 4:
+        return False
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    if union == 0:
+        return False
+    return (inter / union) >= NEAR_DUP_JACCARD
 
 
 def message_contains_keywords(text: str, keywords: List[str]) -> bool:
@@ -162,6 +247,13 @@ async def main() -> int:
         # Dedupe: skip if we already forwarded this exact message (handles duplicate events)
         dedupe_key = (event.chat_id, event.id)
         if dedupe_key in _forwarded_ids:
+            _log_filtered(
+                "duplicate_telegram_event",
+                "(n/a — same message id, before dest loop)",
+                getattr(chat, "title", "") or str(event.chat_id),
+                event.text or "",
+                "Same chat_id + message_id already processed once (duplicate Telegram update).",
+            )
             return
         if len(_forwarded_ids) >= DEDUP_MAX_SIZE:
             _forwarded_ids.discard(_forwarded_ids_order.popleft())
@@ -169,25 +261,57 @@ async def main() -> int:
         _forwarded_ids_order.append(dedupe_key)
 
         text = event.text or ""
-        content_hash = hash(_normalize_text_for_dedupe(text))
+        norm_exact = _normalize_text_for_dedupe(text)
+        norm_similar = _normalize_for_similarity(text)
+        content_hash = hash(norm_exact)
 
         for dest, keywords in output_channels:
             if not message_contains_keywords(text, keywords):
                 continue
-            # Per-dest content dedupe: don't forward same text to same channel twice (e.g. from different sources)
+            # Per-dest exact text dedupe
             content_key = (dest, content_hash)
             if content_key in _content_forwarded:
+                _log_filtered(
+                    "exact_duplicate",
+                    dest,
+                    getattr(chat, "title", "") or str(event.chat_id),
+                    text,
+                    _exact_forwarded_sample.get(
+                        content_key,
+                        "(identical normalized text; sample evicted from cache)",
+                    ),
+                )
                 continue
-            if len(_content_forwarded) >= CONTENT_DEDUP_MAX_SIZE:
-                _content_forwarded.discard(_content_forwarded_order.popleft())
-            _content_forwarded.add(content_key)
-            _content_forwarded_order.append(content_key)
+            # Per-dest near-duplicate (same story, different wording / source)
+            matched_prior_sample = None
+            for norm_prev, orig_sample in _recent_text_by_dest[dest]:
+                if _similar_enough(norm_similar, norm_prev):
+                    matched_prior_sample = orig_sample
+                    break
+            if matched_prior_sample is not None:
+                _log_filtered(
+                    "near_duplicate",
+                    dest,
+                    getattr(chat, "title", "") or str(event.chat_id),
+                    text,
+                    matched_prior_sample,
+                )
+                continue
 
             try:
                 await event.forward_to(dest)
-                log.info("Forwarded to %s from %s: %s...", dest, chat.title, (text or "")[:80])
             except Exception as e:
                 log.exception("Failed to forward to %s: %s", dest, e)
+                continue
+            if len(_content_forwarded) >= CONTENT_DEDUP_MAX_SIZE:
+                old_key = _content_forwarded_order.popleft()
+                _content_forwarded.discard(old_key)
+                _exact_forwarded_sample.pop(old_key, None)
+            _content_forwarded.add(content_key)
+            _content_forwarded_order.append(content_key)
+            _exact_forwarded_sample[content_key] = (text or norm_exact)[:CLIP]
+            _recent_text_by_dest[dest].append((norm_similar, (text or norm_exact)[:CLIP]))
+            log.info("Forwarded to %s from %s: %s...", dest, chat.title, (text or "")[:80])
 
     await client.start()
     for i, (dest, kw) in enumerate(output_channels, 1):
