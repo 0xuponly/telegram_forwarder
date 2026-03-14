@@ -163,6 +163,34 @@ Open **http://127.0.0.1:8765** (set `TELEGRAM_UI_PORT` to change port).
 
 Run the UI on the **same machine** as the forwarder so mute applies to that process. Refresh runs every 8s automatically.
 
+### Keep UI running after closing Terminal
+
+Background jobs die when the terminal closes (SIGHUP). Use either:
+
+**A. `nohup` (quick)** — survives tab/window close; survives logout only if you stay logged in… actually nohup survives terminal close while session lasts:
+
+```bash
+cd /path/to/project
+mkdir -p logs
+nohup env TELEGRAM_UI_QUIET=1 ./run_ui.sh >>logs/ui.out 2>>logs/ui.err &
+```
+
+**B. LaunchAgent (best on macOS)** — survives closing Terminal, logout/login, reboot (after login). Edit paths in `com.epstein.tg-alerts-ui.plist` to match your project, then:
+
+```bash
+mkdir -p logs
+cp com.epstein.tg-alerts-ui.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.epstein.tg-alerts-ui.plist
+```
+
+Stop UI service:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.epstein.tg-alerts-ui.plist
+```
+
+Logs: `logs/ui_launchd.out.log`, `logs/ui_launchd.err.log`. Open **http://127.0.0.1:8765** as usual.
+
 ---
 
 ## Dedupe behaviour
