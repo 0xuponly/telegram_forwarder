@@ -114,8 +114,54 @@ First run: Telegram will ask for phone number and login code. Session is stored 
 | `TELEGRAM_NEAR_DUP_JACCARD` | No | Word-overlap similarity 0–1 (default: `0.68`) |
 | `TELEGRAM_NEAR_DUP_COMPARE_CHARS` | No | Max characters compared per message (default: `1200`) |
 | `TELEGRAM_FILTERED_LOG_MAX_BYTES` | No | Max size of `filtered.log` before rotate (default: 10MB) |
+| `TELEGRAM_PLAY_SOUND_1` | No | `true` / `on` → play sound when a message is forwarded to channel 1 (default: off) |
+| `TELEGRAM_SOUND_NAME_1` | No | Sound for channel 1 (default: `Glass`) |
+| `TELEGRAM_PLAY_SOUND_2` | No | Same for destination 2 |
+| `TELEGRAM_SOUND_NAME_2` | No | (default: `Glass`) |
+| `TELEGRAM_PLAY_SOUND_3` | No | Same for destination 3 |
+| `TELEGRAM_SOUND_NAME_3` | No | (default: `Glass`) |
 
 \*At least one full pair `_FORWARD_TO_1` + `_KEYWORDS_1` must be set.
+
+### Sounds (macOS only)
+
+When a forward **succeeds**, the script runs **`afplay`** on the machine running the process (your Mac). Set `TELEGRAM_PLAY_SOUND_N=true` for that destination row, and pick a sound with `TELEGRAM_SOUND_NAME_N`.
+
+**Built-in names** (no path, no `.aiff`):  
+`Basso`, `Blow`, `Bottle`, `Frog`, `Funk`, `Glass`, `Hero`, `Morse`, `Ping`, `Pop`, `Purr`, `Sosumi`, `Submarine`, `Tink`  
+(files live under `/System/Library/Sounds/`).
+
+**Custom file:** set `TELEGRAM_SOUND_NAME_N` to a full path, e.g. `/Users/you/Music/alert.aiff` (or other formats `afplay` supports).
+
+Linux/Windows: play sound is skipped (log warns if you enabled it).
+
+---
+
+## Local UI (forward list + sound mute)
+
+A small browser UI lists **every successful forward** (UTC timestamp, destination, source channel, full text sample) from `logs/forwards.jsonl`. It also:
+
+- **Per destination** – checkboxes to show/hide rows for each configured `TELEGRAM_FORWARD_TO_N` (display only).
+- **Sounds on (forwarder)** – one master switch. When off, the forwarder **does not** call `afplay` (writes `logs/ui_state.json`). Per-channel `TELEGRAM_PLAY_SOUND_N` must still be on for sound when master is on.
+
+**Homebrew Python** blocks `pip install --user` (PEP 668). Use the project venv:
+
+```bash
+cd /path/to/project
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python ui_app.py
+```
+
+Or one step:
+
+```bash
+./run_ui.sh
+```
+
+Open **http://127.0.0.1:8765** (set `TELEGRAM_UI_PORT` to change port).
+
+Run the UI on the **same machine** as the forwarder so mute applies to that process. Refresh runs every 8s automatically.
 
 ---
 
@@ -137,6 +183,8 @@ Tune near-dup env vars if you see false positives or misses.
 | `logs/filtered.log` | Messages **not** forwarded + reason + text of the **prior forward** (or note) that caused the skip |
 | `logs/out.log` | launchd stdout (if plist points here) |
 | `logs/err.log` | launchd stderr |
+| `logs/forwards.jsonl` | One JSON object per forward (UI + audit); trimmed after ~12k lines |
+| `logs/ui_state.json` | UI master sound on/off (`sounds_enabled`) |
 
 ```bash
 tail -n 100 logs/forwarder.log

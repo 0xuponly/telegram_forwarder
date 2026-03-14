@@ -8,10 +8,14 @@ Requires user account credentials (API ID, API Hash from my.telegram.org).
 
 import asyncio
 import difflib
+import json
 import logging
 import os
 import re
+import subprocess
 import sys
+import threading
+from datetime import datetime, timezone
 from collections import defaultdict, deque
 from logging.handlers import RotatingFileHandler
 from typing import List, Tuple
@@ -60,6 +64,10 @@ FILTERED_LOG_FILE = os.path.join(LOG_DIR, "filtered.log")
 MAX_LOG_BYTES = 5 * 1024 * 1024  # 5 MB
 BACKUP_COUNT = 3
 FILTERED_LOG_MAX_BYTES = int(os.environ.get("TELEGRAM_FILTERED_LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+UI_STATE_FILE = os.path.join(LOG_DIR, "ui_state.json")
+FORWARDS_JSONL = os.path.join(LOG_DIR, "forwards.jsonl")
+FORWARDS_JSONL_MAX_LINES = int(os.environ.get("TELEGRAM_FORWARDS_JSONL_MAX_LINES", "12000"))
+_forward_jsonl_lock = threading.Lock()
 
 # Setup logging
 def _setup_logging() -> logging.Logger:
@@ -199,6 +207,103 @@ def _similar_enough(a: str, b: str) -> bool:
     return (inter / union) >= NEAR_DUP_JACCARD
 
 
+def _sound_settings_for_channels(num_channels: int) -> List[Tuple[bool, str]]:
+    """Per channel index 0..n-1: (play_sound, sound_name_or_path)."""
+    out = []
+    for i in range(num_channels):
+        n = i + 1
+        play = os.environ.get(f"TELEGRAM_PLAY_SOUND_{n}", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        name = (os.environ.get(f"TELEGRAM_SOUND_NAME_{n}") or "Glass").strip() or "Glass"
+        out.append((play, name))
+    return out
+
+
+def _default_ui_state() -> dict:
+    return {"sounds_enabled": True}
+
+
+def _read_ui_state() -> dict:
+    try:
+        with open(UI_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return _default_ui_state()
+        if "sounds_enabled" not in data:
+            data["sounds_enabled"] = True
+        return data
+    except (OSError, json.JSONDecodeError):
+        return _default_ui_state()
+
+
+def ui_sounds_enabled() -> bool:
+    """Master mute from local UI (ui_state.json). Forwarder checks before each afplay."""
+    return bool(_read_ui_state().get("sounds_enabled", True))
+
+
+def _append_forward_jsonl(dest: str, source: str, text: str) -> None:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "dest": dest,
+        "source": source or "",
+        "text": (text or "")[:8000],
+    }
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    with _forward_jsonl_lock:
+        try:
+            with open(FORWARDS_JSONL, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError as e:
+            log.warning("forwards.jsonl append failed: %s", e)
+            return
+        try:
+            with open(FORWARDS_JSONL, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if len(lines) > FORWARDS_JSONL_MAX_LINES:
+                keep = lines[-FORWARDS_JSONL_MAX_LINES :]
+                with open(FORWARDS_JSONL, "w", encoding="utf-8") as f:
+                    f.writelines(keep)
+        except OSError:
+            pass
+
+
+def _play_forward_sound(sound_name_or_path: str) -> None:
+    """Play a sound on the machine running the script (macOS). Non-blocking."""
+    if not ui_sounds_enabled():
+        return
+    if sys.platform != "darwin":
+        return
+    path = sound_name_or_path.strip()
+    if not path:
+        return
+    expanded = os.path.expanduser(path)
+    if os.path.isfile(expanded):
+        audio_path = expanded
+    elif "/" in path or path.startswith("~"):
+        audio_path = expanded
+    else:
+        # Short name e.g. Glass → /System/Library/Sounds/Glass.aiff
+        base = path[:-5] if path.lower().endswith(".aiff") else path
+        audio_path = f"/System/Library/Sounds/{base}.aiff"
+    if not os.path.isfile(audio_path):
+        log.warning("Forward sound file not found: %s", audio_path)
+        return
+    try:
+        subprocess.Popen(
+            ["afplay", audio_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        log.warning("afplay failed (%s): %s", audio_path, e)
+
+
 def message_contains_keywords(text: str, keywords: List[str]) -> bool:
     """Check if message text contains any of the given keywords."""
     if not text or not keywords:
@@ -230,6 +335,23 @@ async def main() -> int:
             "(or TELEGRAM_FORWARD_TO_1 + TELEGRAM_KEYWORDS_1)."
         )
         return 1
+
+    sound_settings = _sound_settings_for_channels(len(output_channels))
+    for i, (dest, _) in enumerate(output_channels):
+        play, snd = sound_settings[i]
+        if play and sys.platform == "darwin":
+            log.info(
+                "Channel %d sound on forward: %s (TELEGRAM_PLAY_SOUND_%d=true)",
+                i + 1,
+                snd,
+                i + 1,
+            )
+        elif play and sys.platform != "darwin":
+            log.warning(
+                "Channel %d TELEGRAM_PLAY_SOUND_%d is on; sounds only work on macOS (darwin).",
+                i + 1,
+                i + 1,
+            )
 
     client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
@@ -265,7 +387,7 @@ async def main() -> int:
         norm_similar = _normalize_for_similarity(text)
         content_hash = hash(norm_exact)
 
-        for dest, keywords in output_channels:
+        for ch_idx, (dest, keywords) in enumerate(output_channels):
             if not message_contains_keywords(text, keywords):
                 continue
             # Per-dest exact text dedupe
@@ -312,6 +434,10 @@ async def main() -> int:
             _exact_forwarded_sample[content_key] = (text or norm_exact)[:CLIP]
             _recent_text_by_dest[dest].append((norm_similar, (text or norm_exact)[:CLIP]))
             log.info("Forwarded to %s from %s: %s...", dest, chat.title, (text or "")[:80])
+            _append_forward_jsonl(dest, getattr(chat, "title", None) or str(event.chat_id), text)
+            play_snd, name_snd = sound_settings[ch_idx]
+            if play_snd:
+                _play_forward_sound(name_snd)
 
     await client.start()
     for i, (dest, kw) in enumerate(output_channels, 1):
