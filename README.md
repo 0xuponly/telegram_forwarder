@@ -1,4 +1,4 @@
-# Third Gulf War Alerts – Telegram channel forwarder
+# Telegram channel forwarder – Third Gulf War Alerts aka Operation Epstein's Fury
 
 Forwards messages from **broadcast Telegram channels only** (groups and private chats are ignored) when the text matches keyword lists. Each destination channel has its own keyword set; a message can be forwarded to more than one destination if it matches multiple sets.
 
